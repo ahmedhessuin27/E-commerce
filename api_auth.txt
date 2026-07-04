@@ -1,0 +1,314 @@
+
+composer create-project "laravel/laravel" Tasks
+
+
+
+Step 2: Enable API and Customize Authentication Exception
+php artisan install:api
+
+
+Next, update the bootstrap/app.php file to customize the authentication exception response for API routes so unauthorized access returns a JSON response:
+
+<?php
+
+use Illuminate\Foundation\Application;
+use Illuminate\Foundation\Configuration\Exceptions;
+use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Auth\AuthenticationException;
+use Illuminate\Http\Request;
+
+return Application::configure(basePath: dirname(__DIR__))
+    ->withRouting(
+        web: __DIR__.'/../routes/web.php',
+        api: __DIR__.'/../routes/api.php',
+        commands: __DIR__.'/../routes/console.php',
+        health: '/up',
+    )
+    ->withMiddleware(function (Middleware $middleware) {
+        //
+    })
+    ->withExceptions(function (Exceptions $exceptions) {
+        $exceptions->render(function (AuthenticationException $e, Request $request) {
+            if ($request->is('api/*')) {
+                return response()->json([
+                    'message' => $e->getMessage(),
+                ], 401);
+            }
+        });
+    })->create();
+
+
+Step 3: Install JWT Package
+Install the tymon/jwt-auth package:
+
+composer require tymon/jwt-auth
+Publish the package configuration:
+
+php artisan vendor:publish --provider="Tymon\JWTAuth\Providers\LaravelServiceProvider"
+Generate the JWT secret key (add to .env):
+
+php artisan jwt:secret
+Open .env and set:
+
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=laravel_jwt
+DB_USERNAME=root
+DB_PASSWORD=
+(Change  DB settings if needed)
+
+Run the migration command
+php artisan migrate
+Step 4: Configure Authentication Guard
+Open config/auth.php and update the api guard to use jwt driver:
+
+'guards' => [
+    // other guards...
+
+    'api' => [
+        'driver' => 'jwt',
+        'provider' => 'users',
+        'hash' => false,
+    ],
+],
+Step 5: Update User Model
+Edit app/Models/User.php to implement JWTSubject:
+
+<?php
+
+namespace App\Models;
+
+// use Illuminate\Contracts\Auth\MustVerifyEmail;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Foundation\Auth\User as Authenticatable;
+use Illuminate\Notifications\Notifiable;
+use Tymon\JWTAuth\Contracts\JWTSubject;
+
+class User extends Authenticatable implements JWTSubject
+{
+    /** @use HasFactory<\Database\Factories\UserFactory> */
+    use HasFactory, Notifiable;
+
+    /**
+     * The attributes that are mass assignable.
+     *
+     * @var list<string>
+     */
+    protected $fillable = [
+        'name',
+        'email',
+        'password',
+        'role',
+    ];
+
+    /**
+     * The attributes that should be hidden for serialization.
+     *
+     * @var list<string>
+     */
+    protected $hidden = [
+        'password',
+        'remember_token',
+    ];
+
+    /**
+     * Get the attributes that should be cast.
+     *
+     * @return array<string, string>
+     */
+    protected function casts(): array
+    {
+        return [
+            'email_verified_at' => 'datetime',
+            'password' => 'hashed',
+        ];
+    }
+
+    public function getJWTIdentifier(): string
+    {
+        return $this->getKey();
+    }
+
+    public function getJWTCustomClaims(): array
+    {
+        return [];
+    }
+}
+
+
+Step 6: Create Helpers folder and add ApeRepsponse.php
+
+<?php
+class ApiResponse
+{
+    public static function success($message = 'Success',  $status = 200 , $data = null)
+    {
+        return response()->json([
+            'status'  => 'success',
+            'message' => $message,
+            'data'    => $data,
+        ], $status);
+    }
+
+    public static function error($message = 'Error', $status = 400, $data = null)
+    {
+        return response()->json([
+            'status'  => 'error',
+            'message' => $message,
+            'data'    => $data,
+        ], $status);
+    }
+}
+
+Step 7: Create RegisterRequest.php
+
+
+<?php
+
+namespace App\Http\Requests;
+
+use ApiResponse;
+use Illuminate\Contracts\Validation\Validator;
+use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
+
+class RegisterRequest extends FormRequest
+{
+    /**
+     * Determine if the user is authorized to make this request.
+     */
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+
+    public function failedValidation(Validator $validator)
+    {
+        $response = ApiResponse::error($validator->errors());
+        throw new \Illuminate\Validation\ValidationException($validator, $response);
+    }
+
+    /**
+     * Get the validation rules that apply to the request.
+     *
+     * @return array<string, \Illuminate\Contracts\Validation\ValidationRule|array<mixed>|string>
+     */
+    public function rules(): array
+    {
+        return [
+            'name'     => 'required|string|max:255',
+            'email'    => [
+                'required',
+                'string',
+                'email',
+                'max:255',
+                Rule::unique('users')->ignore($this->user),
+            ],
+            'password' => 'required|string|min:6|confirmed',
+            'role'     => 'required|in:user,admin',
+        ];
+    }
+}
+
+
+Step 8: Create AuthController
+Create an API controller to handle user registration, login, logout, and token refresh.
+
+Run:
+
+php artisan make:controller API/AuthController
+
+Then, add the following code inside app/Http/Controllers/API/AuthController.php:
+
+<?php
+
+namespace App\Http\Controllers\API;
+
+use ApiResponse;
+use App\Http\Controllers\Controller;
+use App\Http\Requests\RegisterRequest;
+use App\Models\User;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Validator;
+use Tymon\JWTAuth\Facades\JWTAuth;
+
+class AuthController extends Controller
+{
+    // Register new user
+    public function register(RegisterRequest $request)
+    {
+
+        $user = User::create([
+            'name'     => $request->name,
+            'email'    => $request->email,
+            'password' => bcrypt($request->password),
+            'role'     => $request->role,
+        ]);
+        $token = JWTAuth::fromUser($user);
+        return ApiResponse::success('User registered successfully. Please check your email for verification link!', 201, ['token' => $token, 'user' => $user]);
+    }
+
+    // Login user and return JWT token
+    public function login(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'email'    => 'required|email',
+            'password' => 'required|string|min:6',
+        ]);
+        if ($validator->fails()) {
+            ApiResponse::error($validator->errors(), 422);
+        }
+        $user = User::where('email', $request->email)->firstOrFail();
+        if (!Hash::check($request->password, $user->password)) {
+            return ApiResponse::error('Invalid credentials', 401);
+        }
+        $token = JWTAuth::fromUser($user);
+        return ApiResponse::success('User logged in successfully', 200, ['token' => $token, 'user' => $user]);
+    }
+
+    // Get user profile
+    public function profile()
+    {
+        return ApiResponse::success('User profile retrieved successfully', 200, auth('api')->user());
+    }
+
+    // Logout user (invalidate token)
+    public function logout()
+    {
+        try {
+            JWTAuth::invalidate(JWTAuth::getToken());
+            return ApiResponse::success('User logged out successfully', 200);
+        } catch (\Exception $e) {
+            return ApiResponse::error('Failed to logout, please try again.', 500);
+        }
+    }
+}
+
+
+Step 9: Create API Routes
+Define API routes in routes/api.php:
+
+use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\API\AuthController;
+
+Route::prefix('auth')->group(function () {
+    Route::post('register', [AuthController::class, 'register']);
+    Route::post('login', [AuthController::class, 'login']);
+
+    Route::middleware('auth:api')->group(function () {
+        Route::post('profile', [AuthController::class, 'profile']);
+        Route::post('logout', [AuthController::class, 'logout']);
+        Route::post('refresh', [AuthController::class, 'refresh']);
+    });
+});
+
+
+
+
+
+php artisan storage:link
+composer dump-autoload
+composer require kreait/firebase-php "^7.0" --with-all-dependencies
